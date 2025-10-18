@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+.env
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/
+
+# Data / models (don't commit large files)
+data/
+models/
