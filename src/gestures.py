@@ -13,19 +13,17 @@ def norm_dist(a,b,landmarks):
     ax,ay = landmarks[a]; bx,by = landmarks[b]
     return math.hypot(ax-bx, ay-by) / hand_size(landmarks)
 
-def simple_pinch(landmarks, thresh=0.12):
+def simple_pinch(landmarks, thresh=0.2):
     # check thumb_tip (4) to index_tip (8)
     d = norm_dist(4,8,landmarks)
     return d < thresh
 
 def detect(landmarks):
-    """
-    Return (gesture_name, confidence)
-    Start simple: 'pinch', 'open', 'fist' or None
-    """
+    if not landmarks or len(landmarks) < 9:
+        return (None, 0.0)
     if simple_pinch(landmarks):
+        print("Pinch detected!")
         return ("pinch", 0.9)
-    # placeholder for other rules
     return (None, 0.0)
 # smoothing & cooldown helpers
 class Smoother:
