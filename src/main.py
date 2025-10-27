@@ -1,28 +1,21 @@
-##!/usr/bin/env python3
+#!/usr/bin/env python3
 # src/main.py
-# Robust launcher for ArcPalm Stage-3 detection loop.
-# - ensures src package import works
-# - reads camera frames, runs MediaPipe hands
-# - smooths landmarks and calls src.gestures.detect()
-# - draws landmarks, labels, FPS and prints detections
+# ArcPalm Stage-4 ready main: HUD + debounce + safe action calls
 
 import sys, os
-# allow importing "src" package when running python src/main.py
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import time
 import cv2
 import mediapipe as mp
 
-# import your gesture utilities
-# make sure src/gestures.py exists and defines detect() and Smoother
-from src.gestures import detect, Smoother
+from src.gestures import detect, Smoother, perform_action
 
 # ---- CONFIG ----
 CAM_INDEX = 0
 FRAME_WIDTH = 1280
 FRAME_HEIGHT = 720
-FLIP = True          # mirror for selfie view
+FLIP = True
 SMOOTHER_ALPHA = 0.35
 
 # ---- MediaPipe init ----
@@ -40,14 +33,27 @@ hands = mp_hands.Hands(
 
 # ---- helpers ----
 def lm_to_xy_list(landmark_list):
-    """Convert normalized MediaPipe landmark list to list of (x,y) tuples."""
     return [(lm.x, lm.y) for lm in landmark_list]
 
 def draw_label(frame, text, pos=(10,60), color=(0,255,255)):
     cv2.putText(frame, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 1.0, color, 2, cv2.LINE_AA)
 
-# ---- smoother (from your gestures module) ----
+# ---- smoother ----
 smoother = Smoother(alpha=SMOOTHER_ALPHA)
+
+# ---- HUD / debounce state ----
+prev_time = time.time()
+p_time = 0.0
+display_text = ""
+display_timer = 0.0
+display_ttl = 1.5  # seconds to show action popup
+prev_gesture = None
+prev_conf = 0.0
+
+print("\n==============================")
+print("   🚀  ArcPalm Stage-4 HUD Ready ")
+print("   Press 'q' to quit anytime.")
+print("==============================\n")
 
 # ---- camera ----
 cap = cv2.VideoCapture(CAM_INDEX, cv2.CAP_ANY)
@@ -58,14 +64,12 @@ if not cap.isOpened():
     print(f"ERROR: Cannot open camera index {CAM_INDEX}. Try idx 0,1,2...")
     raise SystemExit
 
-prev_time = time.time()
-print("ArcPalm Stage-3 launcher running. Press 'q' to quit.")
+print("ArcPalm Stage-4 launcher running. Press 'q' to quit.")
 
 try:
     while True:
         ret, frame = cap.read()
         if not ret:
-            # temporary read failure, skip and continue
             time.sleep(0.02)
             continue
 
@@ -74,7 +78,6 @@ try:
 
         h, w, _ = frame.shape
 
-        # prepare frame for MediaPipe
         img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         img_rgb.flags.writeable = False
         results = hands.process(img_rgb)
@@ -83,31 +86,46 @@ try:
         gesture_shown = None
         conf_shown = 0.0
 
-        # if hands detected, process each
         if results.multi_hand_landmarks and results.multi_handedness:
-            # iterate over detected hands with handedness
             for hand_landmarks, handedness in zip(results.multi_hand_landmarks, results.multi_handedness):
-                label = handedness.classification[0].label  # "Left" or "Right"
+                label = handedness.classification[0].label
 
-                # convert to list of (x,y) normalized coords
                 lm_list = lm_to_xy_list(hand_landmarks.landmark)
 
-                # smooth positions (smoother expects list of (x,y) pairs)
                 try:
                     lm_smoothed = smoother.smooth(lm_list)
                 except Exception:
-                    # fallback to raw if smoother fails
                     lm_smoothed = lm_list
 
-                # run your gesture detector: expect (gesture_name, confidence)
+                # detection + safe action firing with debounce (only when gesture changes)
                 try:
                     gesture_name, confidence = detect(lm_smoothed)
+                    # normalize base name (if detect returns "swipe_up:0.123")
+                    base_name = gesture_name.split(":")[0] if gesture_name else None
+
+                    # show gesture (but fire action only when changed and confident)
+                    if base_name:
+                        gesture_shown = f"{label}: {base_name}"
+                        conf_shown = confidence
+
+                    # fire action when it changed from previous and confidence high enough
+                    if base_name and confidence > 0.75 and base_name != prev_gesture:
+                        perform_action(gesture_name)  # gesture_name may include dist e.g. "swipe_up:0.123"
+                        display_text = f"Action: {base_name}"
+                        display_timer = time.time()
+                        prev_gesture = base_name
+                        prev_conf = confidence
+
+                    # reset prev_gesture to None if no gesture for a short time (so repeated same gesture later can trigger again)
+                    if not base_name:
+                        # small cooldown before clearing to avoid flicker
+                        if time.time() - display_timer > 0.6:
+                            prev_gesture = None
+
                 except Exception as e:
-                    # detection function raised error — print and continue safely
                     print("detect() error:", repr(e))
                     gesture_name, confidence = (None, 0.0)
 
-                # draw skeleton & landmarks using original (not-smoothed) mp landmarks
                 mp_drawing.draw_landmarks(
                     frame,
                     hand_landmarks,
@@ -116,30 +134,31 @@ try:
                     mp_styles.get_default_hand_connections_style()
                 )
 
-                # draw label near wrist
                 wrist = hand_landmarks.landmark[mp_hands.HandLandmark.WRIST]
                 wx, wy = int(wrist.x * w), int(wrist.y * h)
                 cv2.putText(frame, f"{label}", (wx + 8, wy - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,0), 2)
 
-                # if gesture recognized, annotate and print once
-                if gesture_name:
-                    gesture_shown = f"{label}: {gesture_name} ({confidence:.2f})"
-                    conf_shown = confidence
-                    # print to console (useful for logging)
-                    print(f"[{label}] {gesture_name}  conf={confidence:.2f}")
+                if gesture_shown:
+                    # small per-hand overlay
+                    cv2.putText(frame, f"{gesture_shown} ({conf_shown:.2f})", (10, 100),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200,200,0), 2)
 
-        # compute and draw FPS
+        # FPS HUD
         now = time.time()
         fps = 1.0 / (now - prev_time) if (now - prev_time) > 1e-6 else 0.0
         prev_time = now
         cv2.putText(frame, f'FPS: {int(fps)}', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-        # show detected gesture (if any)
-        if gesture_shown:
-            draw_label(frame, gesture_shown, pos=(10, 70))
+        # show action popup briefly
+        if display_text and (time.time() - display_timer < display_ttl):
+            cv2.putText(frame, display_text, (int(w*0.5)-80, int(h*0.85)),
+                        cv2.FONT_HERSHEY_DUPLEX, 0.9, (0, 255, 255), 2)
+        else:
+            # clear display_text only after ttl
+            if time.time() - display_timer >= display_ttl:
+                display_text = ""
 
-        # display
-        cv2.imshow("ArcPalm Stage-3 (q to quit)", frame)
+        cv2.imshow("ArcPalm Stage-4 (q to quit)", frame)
 
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
@@ -152,4 +171,5 @@ finally:
     cap.release()
     cv2.destroyAllWindows()
     hands.close()
+    print("✅  Stage-4 session closed safely.\n")
     print("Exiting.")
